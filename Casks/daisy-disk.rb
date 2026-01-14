@@ -2,12 +2,17 @@ cask "daisy-disk" do
   version "4.33.2"
   sha256 "acee0b30898c29a877c46ca77eb67c8fd5b312389f8b2415ab6d565fd6c7db88"
 
-  url "https://github.com/hereisderek/homebrew-macapps/releases/download/v0.2.2/DaisyDisk-4.33.2.dmg"
+  url "https://github.com/hereisderek/homebrew-macapps/releases/download/v0.5.0/DaisyDisk-4.33.2.dmg"
   name "DaisyDisk"
   desc "DaisyDisk App"
   homepage "https://github.com/hereisderek/homebrew-macapps"
 
   app "DaisyDisk.app"
+  postflight do
+    system_command "/usr/bin/xattr",
+                   args: ["-d", "com.apple.quarantine", "#{staged_path}/DaisyDisk.app"],
+                   sudo: true
+  end
   
   # Zap stanza is optional
   # zap trash: "~/Library/Application Support/DaisyDisk"
