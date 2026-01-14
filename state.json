@@ -1,5 +1,5 @@
 {
-    "version": "0.2.2",
+    "version": "0.3.0",
     "history": [
         {
             "version": "0.1.0",
@@ -23,6 +23,13 @@
             "version": "0.2.2",
             "updates": [
                 "DaisyDisk 4.33.2"
+            ]
+        },
+        {
+            "version": "0.3.0",
+            "updates": [
+                "Proxyman 6.3.0",
+                "DisplayBuddy 3.1.0"
             ]
         }
     ]
