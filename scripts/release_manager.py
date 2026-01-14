@@ -28,6 +28,36 @@ FILENAME_PATTERN = re.compile(r"^(?P<name>[a-zA-Z0-9]+)-(?P<version>\d+\.\d+\.\d
 
 # --- Phase Pre-A: Repacking ---
 
+def get_pkg_info(pkg_path):
+    """Extract version and package ID from a .pkg file."""
+    try:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            expand_dir = Path(temp_dir) / "expanded"
+            # pkgutil --expand
+            subprocess.run(["pkgutil", "--expand", str(pkg_path), str(expand_dir)], 
+                         check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            
+            # Look for Distribution or PackageInfo
+            dist = expand_dir / "Distribution"
+            pkg_info = expand_dir / "PackageInfo"
+            
+            content = ""
+            if dist.exists():
+                content = dist.read_text(errors="ignore")
+            elif pkg_info.exists():
+                content = pkg_info.read_text(errors="ignore")
+                
+            # Regex for version and id
+            v_match = re.search(r'version="([^"]+)"', content)
+            id_match = re.search(r'(?:id|pkgid)="([^"]+)"', content)
+            
+            version = v_match.group(1) if v_match else None
+            pkg_id = id_match.group(1) if id_match else None
+            
+            return version, pkg_id
+    except Exception:
+        return None, None
+
 def unmount_dmg(mount_point):
     """Safely unmount a DMG, retrying if busy."""
     for i in range(5):
@@ -37,56 +67,101 @@ def unmount_dmg(mount_point):
         time.sleep(1)
     print(f"Warning: Failed to detach {mount_point}")
 
-def recursive_find_app(search_dir):
-    """Recursively search for .app bundles in a directory, unpacking ZIPs and DMGs as needed."""
-    # 1. Check for .app directly
-    apps = list(search_dir.glob("*.app"))
-    if apps:
-        return apps[0]
+def recursive_find_app(search_dir, depth=0):
+    """Recursively search for .app bundles, unpacking ZIPs and DMGs as needed."""
+    if depth > 3:  # Prevent excessive recursion
+        return None
+        
+    print(f"    [Depth {depth}] Scanning {search_dir.name}...")
 
-    # 2. Handle ZIPs
-    for zip_file in search_dir.glob("*.zip"):
-        extract_dir = search_dir / f"ext_zip_{zip_file.stem}"
+    # 1. Check for .app or .pkg directly using rglob
+    # We sort by length to find the shallowest/shortest path first
+    artifacts = sorted(list(search_dir.rglob("*.app")) + list(search_dir.rglob("*.pkg")), key=lambda p: len(p.parts))
+    
+    # Filter out pkgs inside .app (e.g. Contents/Resources/install.pkg)
+    final_artifacts = []
+    for art in artifacts:
+        if ".app/" in str(art) and art.suffix == ".pkg":
+            continue
+        # Also ignore dotfiles
+        if "/." in str(art):
+            continue
+        final_artifacts.append(art)
+        
+    if final_artifacts:
+        print(f"    Found artifact: {final_artifacts[0].name}")
+        return final_artifacts[0]
+
+    # 2. Look for archives to unpack (ZIP)
+    # Use rglob to find nested archives
+    zips = list(search_dir.rglob("*.zip"))
+    for zip_file in zips:
+        # Avoid processing items inside an already found app or hidden folders
+        if ".app/" in str(zip_file) or "/." in str(zip_file): continue
+        
+        extract_dir = zip_file.parent / f"ext_zip_{zip_file.stem}"
         if extract_dir.exists(): continue 
-        extract_dir.mkdir()
+        extract_dir.mkdir(parents=True, exist_ok=True)
         
+        print(f"    Unzipping {zip_file.name}...")
         try:
-            subprocess.run(["unzip", "-q", str(zip_file), "-d", str(extract_dir)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            found = recursive_find_app(extract_dir)
+            # -n: never overwrite, -q: quiet
+            subprocess.run(["unzip", "-n", "-q", str(zip_file), "-d", str(extract_dir)], check=True)
+            found = recursive_find_app(extract_dir, depth + 1)
             if found: return found
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"    Warning: Failed to unzip {zip_file.name}: {e}")
 
-    # 3. Handle DMGs
-    for dmg_file in search_dir.glob("*.dmg"):
-        extract_dir = search_dir / f"ext_dmg_{dmg_file.stem}"
-        if extract_dir.exists(): continue
-        extract_dir.mkdir()
+    # 3. Look for archives to unpack (DMG)
+    dmgs = list(search_dir.rglob("*.dmg"))
+    for dmg_file in dmgs:
+        if ".app/" in str(dmg_file) or "/." in str(dmg_file): continue
         
-        mount_point = search_dir / f"mnt_{dmg_file.stem}"
+        extract_dir = dmg_file.parent / f"ext_dmg_{dmg_file.stem}"
+        if extract_dir.exists(): continue
+        extract_dir.mkdir(parents=True, exist_ok=True)
+        
+        mount_point = dmg_file.parent / f"mnt_{dmg_file.stem}"
         mount_point.mkdir(exist_ok=True)
         
+        print(f"    Mounting {dmg_file.name}...")
         try:
             # Mount
-            subprocess.run(["hdiutil", "attach", str(dmg_file), "-mountpoint", str(mount_point), "-nobrowse", "-quiet", "-noverify"], check=True)
+            subprocess.run([
+                "hdiutil", "attach", str(dmg_file), 
+                "-mountpoint", str(mount_point), 
+                "-nobrowse", "-quiet", "-noverify", "-noautoopen"
+            ], check=True, timeout=30) # Add timeout to prevent hangs
             
-            # Copy visible contents to extract_dir to allow recursion (since DMG is read-only)
+            # Copy contents
+            print(f"    Copying contents from {dmg_file.name}...")
             for item in mount_point.iterdir():
                 if item.name.startswith("."): continue
+                # Skip symlinks to /Applications to avoid copying system apps
+                if item.is_symlink() and str(item.readlink()) == "/Applications": continue
+                
                 dest = extract_dir / item.name
-                if item.is_dir():
-                    shutil.copytree(item, dest, symlinks=True)
-                else:
-                    shutil.copy2(item, dest)
+                if dest.exists(): continue
+                
+                try:
+                    if item.is_dir():
+                        shutil.copytree(item, dest, symlinks=True)
+                    else:
+                        shutil.copy2(item, dest)
+                except Exception as cp_err:
+                    print(f"    Warning: Failed to copy {item.name}: {cp_err}")
             
             unmount_dmg(mount_point)
             
             # Recurse
-            found = recursive_find_app(extract_dir)
+            found = recursive_find_app(extract_dir, depth + 1)
             if found: return found
             
+        except subprocess.TimeoutExpired:
+             print(f"    Error: Timeout mounting {dmg_file.name}")
+             unmount_dmg(mount_point)
         except Exception as e:
-            print(f"Failed to process DMG {dmg_file}: {e}")
+            print(f"    Failed to process DMG {dmg_file.name}: {e}")
             if mount_point.exists():
                 unmount_dmg(mount_point)
 
@@ -117,15 +192,59 @@ def try_repack(file_path):
         else:
             return None
             
-        found_app = recursive_find_app(work_extract_dir)
+        found_artifact = recursive_find_app(work_extract_dir)
         
-        if not found_app:
+        if not found_artifact:
             return None
             
-        print(f"  Found app: {found_app.name}")
+        print(f"  Found artifact: {found_artifact.name}")
         
+        # Handle .pkg
+        if found_artifact.suffix == ".pkg":
+            version, pkg_id = get_pkg_info(found_artifact)
+            app_name = found_artifact.stem # Default to filename if we can't get name from metadata easily
+            
+            if not version:
+                print("  Warning: Could not determine version from pkg metadata. Asking user or using filename if compliant.")
+                # Fallback: try to parse version from filename?
+                # or just fail.
+                # Let's try to infer from original filename if possible?
+                # For now return None or proceed with manual version?
+                # Let's fallback to "0.0.0" and let user rename it? No that breaks logic.
+                pass 
+                
+            if not version:
+                 # Try to extract version from filename if it looks like Name-1.2.3.pkg
+                 m = re.search(r'-(\d+\.\d+\.\d+)', found_artifact.name)
+                 if m:
+                     version = m.group(1)
+                     app_name = found_artifact.name[:m.start()]
+            
+            if not version:
+                # Try original filename
+                m = re.search(r'-(\d+\.\d+\.\d+)', file_path.name)
+                if m:
+                     version = m.group(1)
+                     # App Name is start of string
+                     # But file_path is messy e.g. "DisplayBuddy_3.1.0_xclient.info.zip"
+                     # We can try to guess
+                     pass
+
+            if not version:
+                print("  Error: Could not determine version for .pkg.")
+                return None
+                
+            safe_name = re.sub(r'[^a-zA-Z0-9]', '', app_name)
+            new_filename = f"{safe_name}-{version}.pkg"
+            new_file_path = UPLOAD_DIR / new_filename
+            
+            print(f"  Repacking (renaming) to {new_filename}...")
+            shutil.copy2(found_artifact, new_file_path)
+            return new_file_path
+
+        # Handle .app
         # Parse Info.plist
-        info_plist = found_app / "Contents" / "Info.plist"
+        info_plist = found_artifact / "Contents" / "Info.plist"
         if not info_plist.exists():
             print("  Error: Info.plist not found.")
             return None
@@ -152,7 +271,7 @@ def try_repack(file_path):
         cmd = [
             "hdiutil", "create",
             "-volname", app_name,
-            "-srcfolder", str(found_app),
+            "-srcfolder", str(found_artifact),
             "-ov",
             "-format", "UDZO",
             str(new_file_path)
@@ -294,7 +413,17 @@ def calculate_sha256(file_path):
             sha256_hash.update(byte_block)
     return sha256_hash.hexdigest()
 
-def get_cask_template(token, name, version, sha256, url, homepage_url):
+def get_cask_template(token, name, version, sha256, url, homepage_url, artifact_type="app", pkg_id=None):
+    stanza = ""
+    if artifact_type == "app":
+        stanza = f'app "{name}.app"'
+    elif artifact_type == "pkg":
+        stanza = f'pkg "{name}-{version}.pkg"'
+        if pkg_id:
+            stanza += f'\n  uninstall pkgutil: "{pkg_id}"'
+        else:
+             stanza += f'\n  # uninstall pkgutil: "com.example.{token}"'
+             
     return f"""cask "{token}" do
   version "{version}"
   sha256 "{sha256}"
@@ -304,7 +433,7 @@ def get_cask_template(token, name, version, sha256, url, homepage_url):
   desc "{name} App"
   homepage "{homepage_url}"
 
-  app "{name}.app"
+  {stanza}
   
   # Zap stanza is optional
   # zap trash: "~/Library/Application Support/{name}"
@@ -320,6 +449,15 @@ def process_casks(valid_files, new_repo_version, repo_name):
         cask_token = camel_to_kebab(file_info["name"])
         cask_path = CASKS_DIR / f"{cask_token}.rb"
         
+        # Determine Artifact Type
+        artifact_type = "app"
+        pkg_id = None
+        if file_info["ext"] == "pkg":
+            artifact_type = "pkg"
+            # Try to get pkg_id again if creating new cask
+            if not cask_path.exists():
+                 _, pkg_id = get_pkg_info(file_info["path"])
+
         # Construct the future URL for the file in GitHub Releases
         # https://github.com/<user>/<repo>/releases/download/v<RepoVersion>/<filename>
         download_url = f"https://github.com/{repo_name}/releases/download/v{new_repo_version}/{file_info['filename']}"
@@ -353,7 +491,9 @@ def process_casks(valid_files, new_repo_version, repo_name):
                 version=file_info["version"],
                 sha256=file_sha,
                 url=download_url,
-                homepage_url=homepage
+                homepage_url=homepage,
+                artifact_type=artifact_type,
+                pkg_id=pkg_id
             )
             
             with open(cask_path, "w") as f:
@@ -420,6 +560,15 @@ def main():
     
     # Pre-process: Repack any non-compliant archives
     preprocess_files()
+    
+    # Pause for manual inspection
+    print("\nRepacking phase complete.")
+    print(f"Please inspect the files in '{UPLOAD_DIR}' to ensure they are correct.")
+    try:
+        input("Press Enter to continue with the release process (or Ctrl+C to abort)...")
+    except KeyboardInterrupt:
+        print("\nAborted by user.")
+        sys.exit(0)
     
     valid_files = scan_upload_folder()
 
