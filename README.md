@@ -2,6 +2,24 @@
 
 This project automates the distribution of macOS applications via Homebrew. It manages local binary detection, versioning, Cask updates, and GitHub Release creation.
 
+## Installation & Usage
+
+To install apps from this tap:
+
+1. **Tap the repository:**
+   ```bash
+   brew tap hereisderek/macapps
+   ```
+
+2. **Install an app:**
+   ```bash
+   brew install --cask <app-name>
+   ```
+   Example:
+   ```bash
+   brew install --cask daisy-disk
+   ```
+
 ## Prerequisites
 
 - Python 3.6+

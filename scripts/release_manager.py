@@ -7,6 +7,9 @@ import re
 import json
 import argparse
 import subprocess
+import plistlib
+import tempfile
+import time
 from pathlib import Path
 from dotenv import load_dotenv
 from github import Github, Auth
@@ -22,6 +25,169 @@ ENV_FILE = WORKSPACE_ROOT / ".env"
 
 # Regex for AppName-Version.ext (e.g. MyTool-1.0.2.dmg)
 FILENAME_PATTERN = re.compile(r"^(?P<name>[a-zA-Z0-9]+)-(?P<version>\d+\.\d+\.\d+)\.(?P<ext>dmg|pkg|zip)$")
+
+# --- Phase Pre-A: Repacking ---
+
+def unmount_dmg(mount_point):
+    """Safely unmount a DMG, retrying if busy."""
+    for i in range(5):
+        res = subprocess.run(["hdiutil", "detach", str(mount_point), "-force", "-quiet"], capture_output=True)
+        if res.returncode == 0:
+            return
+        time.sleep(1)
+    print(f"Warning: Failed to detach {mount_point}")
+
+def recursive_find_app(search_dir):
+    """Recursively search for .app bundles in a directory, unpacking ZIPs and DMGs as needed."""
+    # 1. Check for .app directly
+    apps = list(search_dir.glob("*.app"))
+    if apps:
+        return apps[0]
+
+    # 2. Handle ZIPs
+    for zip_file in search_dir.glob("*.zip"):
+        extract_dir = search_dir / f"ext_zip_{zip_file.stem}"
+        if extract_dir.exists(): continue 
+        extract_dir.mkdir()
+        
+        try:
+            subprocess.run(["unzip", "-q", str(zip_file), "-d", str(extract_dir)], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            found = recursive_find_app(extract_dir)
+            if found: return found
+        except Exception:
+            pass
+
+    # 3. Handle DMGs
+    for dmg_file in search_dir.glob("*.dmg"):
+        extract_dir = search_dir / f"ext_dmg_{dmg_file.stem}"
+        if extract_dir.exists(): continue
+        extract_dir.mkdir()
+        
+        mount_point = search_dir / f"mnt_{dmg_file.stem}"
+        mount_point.mkdir(exist_ok=True)
+        
+        try:
+            # Mount
+            subprocess.run(["hdiutil", "attach", str(dmg_file), "-mountpoint", str(mount_point), "-nobrowse", "-quiet", "-noverify"], check=True)
+            
+            # Copy visible contents to extract_dir to allow recursion (since DMG is read-only)
+            for item in mount_point.iterdir():
+                if item.name.startswith("."): continue
+                dest = extract_dir / item.name
+                if item.is_dir():
+                    shutil.copytree(item, dest, symlinks=True)
+                else:
+                    shutil.copy2(item, dest)
+            
+            unmount_dmg(mount_point)
+            
+            # Recurse
+            found = recursive_find_app(extract_dir)
+            if found: return found
+            
+        except Exception as e:
+            print(f"Failed to process DMG {dmg_file}: {e}")
+            if mount_point.exists():
+                unmount_dmg(mount_point)
+
+    return None
+
+def try_repack(file_path):
+    """Attempt to unpack a file, find an app, and repack it into a standard DMG."""
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
+        work_file = temp_path / file_path.name
+        shutil.copy2(file_path, work_file)
+        
+        print(f"  Searching for .app in {file_path.name}...")
+        # Since work_file is in temp_path, we can just search temp_path after basic extraction if it's an archive
+        # Or pass the file to recursive finder if we treat the file itself as the root to explore?
+        # recursive_find_app expects a directory.
+        
+        # Initial extraction of the main file
+        work_extract_dir = temp_path / "root_extract"
+        work_extract_dir.mkdir()
+        
+        if file_path.suffix == ".zip":
+            subprocess.run(["unzip", "-q", str(work_file), "-d", str(work_extract_dir)], check=True)
+        elif file_path.suffix == ".dmg":
+            # treat as DMG found inside
+            # Just move it to the extract dir so recursive finder picks it up
+            shutil.move(work_file, work_extract_dir / file_path.name)
+        else:
+            return None
+            
+        found_app = recursive_find_app(work_extract_dir)
+        
+        if not found_app:
+            return None
+            
+        print(f"  Found app: {found_app.name}")
+        
+        # Parse Info.plist
+        info_plist = found_app / "Contents" / "Info.plist"
+        if not info_plist.exists():
+            print("  Error: Info.plist not found.")
+            return None
+            
+        with open(info_plist, "rb") as f:
+            plist = plistlib.load(f)
+            
+        app_name = plist.get("CFBundleName")
+        version = plist.get("CFBundleShortVersionString")
+        
+        if not app_name or not version:
+            print("  Error: Could not determine Name or Version from Info.plist")
+            return None
+            
+        # Sanitize name
+        safe_name = re.sub(r'[^a-zA-Z0-9]', '', app_name)
+        new_filename = f"{safe_name}-{version}.dmg"
+        new_file_path = UPLOAD_DIR / new_filename
+        
+        print(f"  Repacking to {new_filename}...")
+        
+        # Create DMG
+        # hdiutil create -volname "AppName" -srcfolder "path/to/App.app" -ov -format UDZO "path/to/output.dmg"
+        cmd = [
+            "hdiutil", "create",
+            "-volname", app_name,
+            "-srcfolder", str(found_app),
+            "-ov",
+            "-format", "UDZO",
+            str(new_file_path)
+        ]
+        
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+        return new_file_path
+
+def preprocess_files():
+    """Scan upload folder for non-compliant files and try to repack them."""
+    print("Preprocessing files in upload/...")
+    # List files to avoid modification during iteration issues
+    files = list(UPLOAD_DIR.iterdir())
+    
+    for file_path in files:
+        if file_path.name.startswith("."): continue
+        if not file_path.is_file(): continue
+        
+        # If matches correct pattern, skip
+        if FILENAME_PATTERN.match(file_path.name):
+            continue
+            
+        # If it's a candidate for repacking (Zip or DMG)
+        if file_path.suffix in ['.zip', '.dmg']:
+            print(f"Attempting to repack: {file_path.name}")
+            try:
+                new_dmg = try_repack(file_path)
+                if new_dmg:
+                    print(f"Successfully repacked to: {new_dmg.name}")
+                    # Remove original
+                    file_path.unlink()
+                else:
+                    print(f"Skipping {file_path.name}: Could not extract valid .app")
+            except Exception as e:
+                print(f"Error repacking {file_path.name}: {e}")
 
 # --- Phase A: Validation & Setup ---
 
@@ -212,9 +378,12 @@ def git_commit_push(files_to_commit, message):
             # git commit
             subprocess.run(["git", "commit", "-m", message], check=True)
             
+        # Get current branch name
+        branch = subprocess.check_output(["git", "rev-parse", "--abbrev-ref", "HEAD"]).decode().strip()
+        
         # git push
-        print("Pushing to main...")
-        subprocess.run(["git", "push", "origin", "main"], check=True)
+        print(f"Pushing to {branch}...")
+        subprocess.run(["git", "push", "origin", branch], check=True)
     except subprocess.CalledProcessError as e:
         print(f"Git operation failed: {e}")
         sys.exit(1)
@@ -248,6 +417,10 @@ def main():
 
     # Phase A
     github_token, repo_name = setup_environment()
+    
+    # Pre-process: Repack any non-compliant archives
+    preprocess_files()
+    
     valid_files = scan_upload_folder()
 
     # Phase B
