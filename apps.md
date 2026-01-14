@@ -26,6 +26,8 @@ brew install --cask hereisderek/macapps/<app-command>
 
 | Application | Version | Install Command | Description |
 |-------------|---------|-----------------|-------------|
+| **Charles** | 5.0.2 | `brew install --cask charles` | Charles App |
 | **DaisyDisk** | 4.33.2 | `brew install --cask daisy-disk` | DaisyDisk App |
 | **DisplayBuddy** | 3.1.0 | `brew install --cask display-buddy` | DisplayBuddy App |
+| **MacsFanControl** | 1.5.20 | `brew install --cask macs-fan-control` | MacsFanControl App |
 | **Proxyman** | 6.3.0 | `brew install --cask proxyman` | Proxyman App |
