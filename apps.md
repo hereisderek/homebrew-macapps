@@ -16,6 +16,12 @@ Then install the specific app using its command:
 brew install --cask <app-command>
 ```
 
+Or install directly without tapping first:
+
+```bash
+brew install --cask hereisderek/macapps/<app-command>
+```
+
 ## Available Apps
 
 | Application | Version | Install Command | Description |

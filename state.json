@@ -1,5 +1,5 @@
 {
-    "version": "0.3.0",
+    "version": "0.3.1",
     "history": [
         {
             "version": "0.1.0",
@@ -30,6 +30,13 @@
             "updates": [
                 "Proxyman 6.3.0",
                 "DisplayBuddy 3.1.0"
+            ]
+        },
+        {
+            "version": "0.3.1",
+            "updates": [
+                "DisplayBuddy 3.1.0",
+                "Proxyman 6.3.0"
             ]
         }
     ]
