@@ -503,6 +503,58 @@ def process_casks(valid_files, new_repo_version, repo_name):
             
     return updates_log
 
+def update_apps_md():
+    """Regenerate apps.md with the latest list of Casks."""
+    print("Updating apps.md...")
+    apps_md_path = WORKSPACE_ROOT / "apps.md"
+    
+    header = """# Supported Applications
+
+This page lists all the applications available in this Homebrew tap.
+
+## Installation
+
+To install any of the apps listed below, first tap the repository:
+
+```bash
+brew tap hereisderek/macapps
+```
+
+Then install the specific app using its command:
+
+```bash
+brew install --cask <app-command>
+```
+
+## Available Apps
+
+| Application | Version | Install Command | Description |
+|-------------|---------|-----------------|-------------|
+"""
+    
+    rows = []
+    for cask_file in sorted(CASKS_DIR.glob("*.rb")):
+        if cask_file.name.startswith("."): continue
+        
+        with open(cask_file, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+            
+        # Parse minimal info using regex
+        name_match = re.search(r'name "([^"]+)"', content)
+        version_match = re.search(r'version "([^"]+)"', content)
+        desc_match = re.search(r'desc "([^"]+)"', content)
+        
+        name = name_match.group(1) if name_match else cask_file.stem
+        version = version_match.group(1) if version_match else "?"
+        desc = desc_match.group(1) if desc_match else ""
+        command = cask_file.stem
+        
+        row = f"| **{name}** | {version} | `brew install --cask {command}` | {desc} |"
+        rows.append(row)
+        
+    with open(apps_md_path, "w") as f:
+        f.write(header + "\n".join(rows) + "\n")
+
 # --- Phase D: Git & GitHub Release ---
 
 def git_commit_push(files_to_commit, message):
@@ -591,9 +643,12 @@ def main():
     })
     save_state(state)
 
+    # Generate apps.md
+    update_apps_md()
+
     # Phase D
     # Git
-    files_to_commit = [str(CASKS_DIR), str(STATE_FILE)]
+    files_to_commit = [str(CASKS_DIR), str(STATE_FILE), "apps.md"]
     commit_msg = f"Update apps: {', '.join([f['name'] for f in valid_files])} (Bump to v{new_repo_version})"
     git_commit_push(files_to_commit, commit_msg)
     
