@@ -1,1 +1,15 @@
-{"version": "0.0.0", "history": []}
+{
+    "version": "0.1.0",
+    "history": [
+        {
+            "version": "0.1.0",
+            "updates": [
+                "Charles 5.0.2",
+                "DaisyDisk 4.33.2",
+                "DisplayBuddy 3.1.0",
+                "MacsFanControl 1.5.20",
+                "Proxyman 6.3.0"
+            ]
+        }
+    ]
+}
