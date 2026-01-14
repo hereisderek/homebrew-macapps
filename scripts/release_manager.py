@@ -747,6 +747,9 @@ def create_github_release_and_upload(token, repo_name, tag, title, body, assets)
 # --- Phase E: Cleanup ---
 
 def cleanup_files(valid_files):
+    if not UPLOADED_DIR.exists():
+        UPLOADED_DIR.mkdir(exist_ok=True)
+
     for file_info in valid_files:
         src = file_info["path"]
         dst = UPLOADED_DIR / src.name
