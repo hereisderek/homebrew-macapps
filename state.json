@@ -1,5 +1,5 @@
 {
-    "version": "0.2.0",
+    "version": "0.2.1",
     "history": [
         {
             "version": "0.1.0",
@@ -9,6 +9,12 @@
         },
         {
             "version": "0.2.0",
+            "updates": [
+                "DaisyDisk 4.33.2"
+            ]
+        },
+        {
+            "version": "0.2.1",
             "updates": [
                 "DaisyDisk 4.33.2"
             ]
