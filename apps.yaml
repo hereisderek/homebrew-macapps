@@ -3,8 +3,3 @@ FineTune:
   xattr_clear: true
   versions:
   - 1.0.0
-Rectangle:
-  github: https://github.com/rxhanson/Rectangle
-  versions:
-  - '0.93'
-  - 0.81
