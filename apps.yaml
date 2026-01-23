@@ -2,4 +2,9 @@ FineTune:
   github: https://github.com/ronitsingh10/FineTune
   xattr_clear: true
   versions:
-    - 1.0.0
+  - 1.0.0
+Rectangle:
+  github: https://github.com/rxhanson/Rectangle
+  versions:
+  - '0.93'
+  - 0.81

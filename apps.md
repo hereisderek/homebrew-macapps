@@ -29,7 +29,9 @@ brew install --cask hereisderek/macapps/<app-command>
 | **Charles** | 5.0.2 | `brew install --cask hereisderek/macapps/charles` | Charles App |
 | **DaisyDisk** | 4.33.2 | `brew install --cask hereisderek/macapps/daisy-disk` | DaisyDisk App |
 | **DisplayBuddy** | 3.1.0 | `brew install --cask hereisderek/macapps/display-buddy` | DisplayBuddy App |
-| **FineTune** | 1.0.0 | `brew install --cask hereisderek/macapps/fine-tune` | Per-application audio control for macOS. |
+| **FineTune** | 1.0.0 | `brew install --cask hereisderek/macapps/fine-tune` | FineTune App |
 | **Macs Fan Control** | 1.5.20 | `brew install --cask hereisderek/macapps/macs-fan-control` | Macs Fan Control App |
 | **Nigate** | 1.3.4 | `brew install --cask hereisderek/macapps/nigate` | Nigate App |
 | **Proxyman** | 6.3.0 | `brew install --cask hereisderek/macapps/proxyman` | Proxyman App |
+| **Rectangle** | 0.93 | `brew install --cask hereisderek/macapps/rectangle` | Rectangle App |
+| **Rectangle** | 0.81 | `brew install --cask hereisderek/macapps/rectangle@0.81` | Rectangle App |
