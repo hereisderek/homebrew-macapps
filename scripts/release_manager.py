@@ -5,6 +5,8 @@ import shutil
 import hashlib
 import re
 import json
+import yaml
+import requests
 import argparse
 import subprocess
 import plistlib
@@ -21,6 +23,7 @@ UPLOAD_DIR = WORKSPACE_ROOT / "upload"
 UPLOADED_DIR = WORKSPACE_ROOT / "uploaded"
 CASKS_DIR = WORKSPACE_ROOT / "Casks"
 STATE_FILE = WORKSPACE_ROOT / "state.json"
+APPS_YAML = WORKSPACE_ROOT / "apps.yaml"
 ENV_FILE = WORKSPACE_ROOT / ".env"
 
 # Regex for AppName-Version.ext (e.g. MyTool-1.0.2.dmg)
@@ -417,7 +420,7 @@ def save_state(state):
     with open(STATE_FILE, "w") as f:
         json.dump(state, f, indent=4)
 
-def determine_version_bump(valid_files, current_version_str, force_major=False):
+def determine_version_bump(valid_files, updated_apps_info, current_version_str, force_major=False):
     """Determine the new repository release version."""
     current_ver = Version(current_version_str)
     
@@ -426,19 +429,29 @@ def determine_version_bump(valid_files, current_version_str, force_major=False):
 
     is_minor_bump = False
     
+    # Check local uploads
     for file_info in valid_files:
-        # Check if Cask exists
         cask_token = camel_to_kebab(file_info["name"])
         cask_path = CASKS_DIR / f"{cask_token}.rb"
-        
         if not cask_path.exists():
             is_minor_bump = True
             break
+
+    # Check virtual updates
+    if not is_minor_bump:
+        for app_info in updated_apps_info:
+            if app_info.get("is_new"):
+                is_minor_bump = True
+                break
             
     if is_minor_bump:
         return current_ver.next_minor()
-    else:
+    
+    # If there are any updates at all, it's a patch
+    if valid_files or updated_apps_info:
         return current_ver.next_patch()
+        
+    return current_ver
 
 def camel_to_kebab(name):
     """Convert CamelCase to kebab-case (e.g. MyTool -> my-tool)."""
@@ -756,22 +769,232 @@ def cleanup_files(valid_files):
         print(f"Moving {src.name} to uploaded/")
         shutil.move(src, dst)
 
+# --- Phase F: Virtual Casks (apps.yaml) ---
+
+def calculate_url_sha256(url):
+    """Calculate SHA256 of a remote file."""
+    try:
+        response = requests.get(url, stream=True, timeout=30)
+        response.raise_for_status()
+        sha256_hash = hashlib.sha256()
+        for chunk in response.iter_content(chunk_size=8192):
+            sha256_hash.update(chunk)
+        return sha256_hash.hexdigest()
+    except Exception as e:
+        print(f"    Error downloading {url}: {e}")
+        return None
+
+def find_hash_in_release(release, binary_name):
+    """Try to find SHA256 hash in release assets or body."""
+    # 1. Look in assets for checksum files
+    for asset in release.get_assets():
+        name = asset.name.lower()
+        if any(x in name for x in ["checksum", "sha256", "shasum"]):
+            if name.endswith((".txt", ".sha256", ".sha256sum", ".sum")):
+                print(f"    Possible hash file found: {asset.name}. Checking...")
+                try:
+                    resp = requests.get(asset.browser_download_url, timeout=10)
+                    resp.raise_for_status()
+                    content = resp.text
+                    # Look for binary_name in content
+                    # Format is usually: <hash>  <filename>
+                    for line in content.splitlines():
+                        if binary_name in line:
+                            match = re.search(r'([a-fA-F0-9]{64})', line)
+                            if match:
+                                found_hash = match.group(1).lower()
+                                print(f"    Found hash for {binary_name} in {asset.name}: {found_hash}")
+                                return found_hash
+                except Exception as e:
+                    print(f"    Failed to read hash file {asset.name}: {e}")
+
+    # 2. Look in release body for the hash
+    if release.body:
+        print(f"    Checking release body for {binary_name} hash...")
+        # Look for a 64-char hex string near the binary name or just any 64-char hex string 
+        # specifically associated with the binary.
+        # This is a bit risky but we can try to find the binary name and then the next hash.
+        body = release.body
+        if binary_name in body:
+            # Find the index of binary_name
+            idx = body.find(binary_name)
+            # Look for hex string in the next 200 characters
+            snippet = body[idx:idx+300]
+            match = re.search(r'([a-fA-F0-9]{64})', snippet)
+            if match:
+                found_hash = match.group(1).lower()
+                print(f"    Found hash for {binary_name} in release body: {found_hash}")
+                return found_hash
+        else:
+            # If binary name not directly in body, maybe just look for any hash if there's only one?
+            matches = re.findall(r'([a-fA-F0-9]{64})', body)
+            if len(matches) == 1:
+                print(f"    Found single hash in release body: {matches[0]}")
+                return matches[0].lower()
+
+    return None
+
+def update_virtual_casks(github_token, calculate_hash=False):
+    """Generate Casks for apps defined in apps.yaml and auto-detect latest version."""
+    if not APPS_YAML.exists():
+        print(f"Error: {APPS_YAML} not found.")
+        return []
+
+    with open(APPS_YAML, "r") as f:
+        apps_config = yaml.safe_load(f)
+
+    if not apps_config:
+        print("No apps found in apps.yaml")
+        return []
+
+    g = Github(auth=Auth.Token(github_token))
+    updated_apps_info = []
+    yaml_changed = False
+
+    for app_name, config in apps_config.items():
+        github_url = config.get("github")
+        versions = config.get("versions", [])
+        xattr_clear = config.get("xattr_clear", False)
+        
+        if not github_url:
+            print(f"Missing github url for {app_name}")
+            continue
+
+        # Extract repo path (owner/repo) from URL
+        repo_path = github_url.replace("https://github.com/", "").strip("/")
+        print(f"Checking for updates: {app_name} ({repo_path})")
+        
+        try:
+            external_repo = g.get_repo(repo_path)
+            latest_release = external_repo.get_latest_release()
+            all_releases = list(external_repo.get_releases())
+        except Exception as e:
+            print(f"Error fetching repo/releases for {repo_path}: {e}")
+            continue
+
+        # Check if the latest release is already in our list
+        latest_v = latest_release.tag_name.lstrip('v')
+        current_v = ""
+        if versions:
+            first_v = versions[0]
+            current_v = first_v.get("version", "").lstrip('v') if isinstance(first_v, dict) else first_v.lstrip('v')
+
+        if latest_v != current_v:
+            print(f"  New version detected for {app_name}: {current_v} -> {latest_v}")
+            # Add to the beginning of the list
+            versions.insert(0, latest_v)
+            apps_config[app_name]["versions"] = versions
+            yaml_changed = True
+        
+        # Now process all versions in the YAML to ensure Casks are up to date
+        for i, version_info in enumerate(versions):
+            if isinstance(version_info, dict):
+                version_str = version_info.get("version")
+                v_xattr_clear = version_info.get("xattr_clear", xattr_clear)
+            else:
+                version_str = version_info
+                v_xattr_clear = xattr_clear
+
+            if not version_str: continue
+            clean_v = version_str.lstrip('v')
+            
+            # Find matching release
+            release = None
+            for r in all_releases:
+                if clean_v in r.tag_name or (r.name and clean_v in r.name):
+                    release = r
+                    break
+            
+            if not release: continue
+
+            # Find best asset
+            asset = None
+            for a in release.get_assets():
+                if a.name.lower().endswith((".dmg", ".pkg", ".zip")):
+                    asset = a
+                    break
+            
+            if not asset: continue
+
+            # Check if Cask already exists and matches version
+            base_token = camel_to_kebab(app_name)
+            is_latest = (i == 0)
+            token = base_token if is_latest else f"{base_token}@{clean_v}"
+            cask_path = CASKS_DIR / f"{token}.rb"
+
+            is_new_app = not cask_path.exists()
+            
+            # Even if it exists, we might want to update it if it's the latest and has changed? 
+            # For now, if it's the latest and we just detected a bump, we definitely update.
+            if is_new_app or (is_latest and latest_v == clean_v and yaml_changed):
+                print(f"  Processing Cask for {app_name} v{clean_v}...")
+                
+                # SHA256 Strategy
+                file_sha = None
+                if calculate_hash:
+                    file_sha = calculate_url_sha256(asset.browser_download_url)
+                else:
+                    file_sha = find_hash_in_release(release, asset.name)
+                    if not file_sha:
+                        file_sha = calculate_url_sha256(asset.browser_download_url)
+                
+                if not file_sha: continue
+
+                artifact_type = "pkg" if asset.name.endswith(".pkg") else "app"
+                
+                content = get_cask_template(
+                    token=token,
+                    name=app_name,
+                    version=clean_v,
+                    sha256=file_sha,
+                    url=asset.browser_download_url,
+                    homepage_url=github_url,
+                    artifact_type=artifact_type,
+                    verified=not v_xattr_clear 
+                )
+                
+                with open(cask_path, "w") as f:
+                    f.write(content)
+                print(f"  Created/Updated Cask: {cask_path.name}")
+                
+                updated_apps_info.append({
+                    "name": app_name,
+                    "version": clean_v,
+                    "is_new": is_new_app
+                })
+
+    if yaml_changed:
+        with open(APPS_YAML, "w") as f:
+            yaml.dump(apps_config, f, sort_keys=False)
+        print(f"Updated {APPS_YAML.name}")
+
+    return updated_apps_info
+
 # --- Main Execution ---
 
 def main():
     parser = argparse.ArgumentParser(description="Automated Homebrew Tap & Release Manager")
     parser.add_argument("--major", action="store_true", help="Force a Major version bump for the repository release")
     parser.add_argument("--non-interactive", action="store_true", help="Skip manual inspection pause")
+    parser.add_argument("--update", action="store_true", help="Generate virtual casks from apps.yaml for GitHub apps")
+    parser.add_argument("--hash", action="store_true", help="Force local calculation of SHA256 by downloading the file")
     args = parser.parse_args()
 
     # Phase A
     github_token, repo_name = setup_environment()
     
+    updated_apps_info = []
+    if args.update:
+        print("Running in --update mode. Checking apps.yaml for new releases...")
+        updated_apps_info = update_virtual_casks(github_token, calculate_hash=args.hash)
+
     # Pre-process: Repack any non-compliant archives
     preprocess_files()
     
     # Pause for manual inspection
-    if not args.non_interactive:
+    valid_files = scan_upload_folder()
+    
+    if valid_files and not args.non_interactive:
         print("\nRepacking phase complete.")
         print(f"Please inspect the files in '{UPLOAD_DIR}' to ensure they are correct.")
         try:
@@ -779,27 +1002,36 @@ def main():
         except KeyboardInterrupt:
             print("\nAborted by user.")
             sys.exit(0)
-    else:
-        print("\nSkipping manual inspection (--non-interactive).")
-    
-    valid_files = scan_upload_folder()
+    elif not valid_files and not updated_apps_info:
+        print("No local uploads or virtual updates found. Nothing to do.")
+        sys.exit(0)
 
     # Phase B
     state = load_state()
     current_repo_version = state.get("version", "0.0.0")
-    new_repo_version = determine_version_bump(valid_files, current_repo_version, args.major)
+    new_repo_version = determine_version_bump(valid_files, updated_apps_info, current_repo_version, args.major)
     
+    if str(new_repo_version) == current_repo_version and not args.major:
+        print("No changes detected. Skipping release.")
+        sys.exit(0)
+
     print(f"Current Repo Version: {current_repo_version}")
     print(f"New Repo Version:     {new_repo_version}")
     
     # Phase C
-    updates_log = process_casks(valid_files, new_repo_version, repo_name)
+    updates_log = []
+    if valid_files:
+        updates_log.extend(process_casks(valid_files, new_repo_version, repo_name))
+    
+    for app in updated_apps_info:
+        status = "Initial Release" if app["is_new"] else "Updated"
+        updates_log.append(f"**{app['name']}**: {status} (v{app['version']})")
     
     # Update State
     state["version"] = str(new_repo_version)
     state["history"].append({
         "version": str(new_repo_version),
-        "updates": [f["name"] + " " + f["version"] for f in valid_files]
+        "updates": [f["name"] + " " + f["version"] for f in valid_files] + [a["name"] + " " + a["version"] for a in updated_apps_info]
     })
     save_state(state)
 
@@ -808,17 +1040,26 @@ def main():
 
     # Phase D
     # Git
-    files_to_commit = [str(CASKS_DIR), str(STATE_FILE), "apps.md"]
-    commit_msg = f"Update apps: {', '.join([f['name'] for f in valid_files])} (Bump to v{new_repo_version})"
+    files_to_commit = [str(CASKS_DIR), str(STATE_FILE), "apps.md", "apps.yaml"]
+    all_names = [f['name'] for f in valid_files] + [a['name'] for a in updated_apps_info]
+    commit_msg = f"Update apps: {', '.join(all_names)} (Bump to v{new_repo_version})"
     git_commit_push(files_to_commit, commit_msg)
     
     # Release
-    release_tag = f"v{new_repo_version}"
-    release_title = f"Release {release_tag}"
-    release_notes = "## Updates\n" + "\n".join([f"* {log}" for log in updates_log])
-    
-    asset_paths = [f["path"] for f in valid_files]
-    create_github_release_and_upload(github_token, repo_name, release_tag, release_title, release_notes, asset_paths)
+    if valid_files:
+        release_tag = f"v{new_repo_version}"
+        release_title = f"Release {release_tag}"
+        release_notes = "## Updates\n" + "\n".join([f"* {log}" for log in updates_log])
+        
+        asset_paths = [f["path"] for f in valid_files]
+        create_github_release_and_upload(github_token, repo_name, release_tag, release_title, release_notes, asset_paths)
+    else:
+        # If ONLY virtual apps updated, we don't need to upload assets to a release, 
+        # but we should still create a tag/release for the repo version.
+        release_tag = f"v{new_repo_version}"
+        release_title = f"Release {release_tag}"
+        release_notes = "## Updates (Virtual Casks)\n" + "\n".join([f"* {log}" for log in updates_log])
+        create_github_release_and_upload(github_token, repo_name, release_tag, release_title, release_notes, [])
 
     # Phase E
     cleanup_files(valid_files)

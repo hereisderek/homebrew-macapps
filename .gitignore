@@ -7,3 +7,9 @@ temp_mount/
 upload/*
 !upload/.keep
 .env
+uploaded
+
+
+.DS_Store
+upload/
+uploaded/

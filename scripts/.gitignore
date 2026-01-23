@@ -1,6 +1,0 @@
-# .gitignore
-.env
-.DS_Store
-__pycache__/
-upload/
-uploaded/

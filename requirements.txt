@@ -1,3 +1,4 @@
 PyGithub
 semantic_version
 python-dotenv
+PyYAML
