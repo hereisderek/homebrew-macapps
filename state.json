@@ -1,5 +1,5 @@
 {
-    "version": "0.3.0",
+    "version": "0.2.0",
     "history": [
         {
             "version": "0.1.0",
@@ -15,13 +15,6 @@
             "version": "0.2.0",
             "updates": [
                 "Nigate 1.3.4"
-            ]
-        },
-        {
-            "version": "0.3.0",
-            "updates": [
-                "Rectangle 0.93",
-                "Rectangle 0.81"
             ]
         }
     ]

@@ -26,8 +26,8 @@ STATE_FILE = WORKSPACE_ROOT / "state.json"
 APPS_YAML = WORKSPACE_ROOT / "apps.yaml"
 ENV_FILE = WORKSPACE_ROOT / ".env"
 
-# Regex for AppName-Version.ext (e.g. MyTool-1.0.2.dmg)
-FILENAME_PATTERN = re.compile(r"^(?P<name>[a-zA-Z0-9]+)-(?P<version>\d+\.\d+\.\d+)\.(?P<ext>dmg|pkg|zip)$")
+# Regex for AppName-Version.ext (e.g. MyTool-1.0.2.dmg or Folx-5.32.dmg)
+FILENAME_PATTERN = re.compile(r"^(?P<name>[a-zA-Z0-9]+)-(?P<version>[\d\.]+)\.(?P<ext>dmg|pkg|zip)$")
 
 # --- Phase Pre-A: Repacking ---
 
@@ -387,7 +387,7 @@ def scan_upload_folder():
     
     if not files:
         print("No files found in upload/ folder.")
-        sys.exit(0)
+        return []
 
     print(f"Found {len(files)} files in upload/...")
 
@@ -715,7 +715,7 @@ brew install --cask hereisderek/macapps/<app-command>
         desc = desc_match.group(1) if desc_match else ""
         command = cask_file.stem
         
-        row = f"| **{name}** | {version} | `brew install --cask {command}` | {desc} |"
+        row = f"| **{name}** | {version} | `brew install --cask hereisderek/macapps/{command}` | {desc} |"
         rows.append(row)
         
     with open(apps_md_path, "w") as f:
@@ -877,25 +877,28 @@ def update_virtual_casks(github_token, calculate_hash=False):
         current_v = ""
         if versions:
             first_v = versions[0]
-            current_v = first_v.get("version", "").lstrip('v') if isinstance(first_v, dict) else first_v.lstrip('v')
+            if isinstance(first_v, dict):
+                current_v = str(first_v.get("version", "")).lstrip('v')
+            else:
+                current_v = str(first_v).lstrip('v')
 
         if latest_v != current_v:
             print(f"  New version detected for {app_name}: {current_v} -> {latest_v}")
-            # Add to the beginning of the list
-            versions.insert(0, latest_v)
+            # Add to the beginning of the list as string
+            versions.insert(0, str(latest_v))
             apps_config[app_name]["versions"] = versions
             yaml_changed = True
         
         # Now process all versions in the YAML to ensure Casks are up to date
         for i, version_info in enumerate(versions):
             if isinstance(version_info, dict):
-                version_str = version_info.get("version")
+                version_str = str(version_info.get("version"))
                 v_xattr_clear = version_info.get("xattr_clear", xattr_clear)
             else:
-                version_str = version_info
+                version_str = str(version_info)
                 v_xattr_clear = xattr_clear
 
-            if not version_str: continue
+            if not version_str or version_str == "None": continue
             clean_v = version_str.lstrip('v')
             
             # Find matching release
