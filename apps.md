@@ -29,5 +29,7 @@ brew install --cask hereisderek/macapps/<app-command>
 | **Charles** | 5.0.2 | `brew install --cask charles` | Charles App |
 | **DaisyDisk** | 4.33.2 | `brew install --cask daisy-disk` | DaisyDisk App |
 | **DisplayBuddy** | 3.1.0 | `brew install --cask display-buddy` | DisplayBuddy App |
+| **FineTune** | 1.0.0 | `brew install --cask fine-tune` | FineTune App |
 | **Macs Fan Control** | 1.5.20 | `brew install --cask macs-fan-control` | Macs Fan Control App |
+| **Nigate** | 1.3.4 | `brew install --cask nigate` | Nigate App |
 | **Proxyman** | 6.3.0 | `brew install --cask proxyman` | Proxyman App |
